@@ -1,0 +1,13 @@
+numpy>=1.24,<3
+pandas>=2.0,<3
+Pillow>=10,<13
+opencv-python-headless>=4.8,<5
+scikit-image>=0.22,<1
+scikit-learn>=1.4,<2
+matplotlib>=3.7,<4
+seaborn>=0.13,<1
+joblib>=1.3,<2
+streamlit>=1.35,<2
+# Required only by the automatic PlantVillage downloader:
+datasets>=2.20,<5
+huggingface_hub>=0.24,<2
