@@ -26,7 +26,6 @@ class SegmentationInfo:
 def read_pil(path: str) -> Image.Image:
     with Image.open(path) as im:
         im = ImageOps.exif_transpose(im)
-        # Nếu là ảnh PNG có kênh trong suốt (Alpha channel), chuyển nền thành màu TRẮNG
         if im.mode in ('RGBA', 'LA') or (im.mode == 'P' and 'transparency' in im.info):
             rgba = im.convert('RGBA')
             bg = Image.new('RGB', rgba.size, (255, 255, 255))
@@ -34,18 +33,30 @@ def read_pil(path: str) -> Image.Image:
             return bg
         return im.convert('RGB')
 
+
 def to_rgb(image: Image.Image | np.ndarray) -> np.ndarray:
+    """Chuyển đổi ảnh sang RGB 256x256, tự động thay thế kênh Alpha (trong suốt) bằng màu TRẮNG."""
     if isinstance(image, Image.Image):
-        return np.array(ImageOps.exif_transpose(image).convert('RGB').resize(
-            (IMAGE_SIZE, IMAGE_SIZE), Image.Resampling.LANCZOS
-        ))
+        im = ImageOps.exif_transpose(image)
+        # Xử lý nền trong suốt của ảnh PNG/WEBP
+        if im.mode in ('RGBA', 'LA') or (im.mode == 'P' and 'transparency' in im.info):
+            rgba = im.convert('RGBA')
+            bg = Image.new('RGB', rgba.size, (255, 255, 255))
+            bg.paste(rgba, mask=rgba.split()[3])
+            im = bg
+        else:
+            im = im.convert('RGB')
+        return np.array(im.resize((IMAGE_SIZE, IMAGE_SIZE), Image.Resampling.LANCZOS))
+    
     a = np.asarray(image)
     if a.ndim == 2:
         a = cv2.cvtColor(a, cv2.COLOR_GRAY2RGB)
     if a.shape[-1] == 4:
-        a = cv2.cvtColor(a, cv2.COLOR_RGBA2RGB)
+        # Nếu mảng 4 kênh RGBA: hòa trộn kênh Alpha với nền trắng (255)
+        alpha = a[:, :, 3:] / 255.0
+        a = (a[:, :, :3] * alpha + 255.0 * (1.0 - alpha)).astype(np.uint8)
+        
     return cv2.resize(a, (IMAGE_SIZE, IMAGE_SIZE), interpolation=cv2.INTER_AREA)
-
 
 def normalize_illumination(rgb: np.ndarray) -> np.ndarray:
     """Cân bằng ánh sáng bằng CLAHE trong không gian màu LAB để triệt tiêu bóng râm/thừa sáng."""
