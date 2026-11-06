@@ -52,8 +52,17 @@ else:
 
 if image_file is not None:
     try:
-        photo = ImageOps.exif_transpose(Image.open(io.BytesIO(image_file.getvalue()))).convert('RGB')
+        raw_img = Image.open(io.BytesIO(image_file.getvalue()))
+        raw_img = ImageOps.exif_transpose(raw_img)
         
+        # Chuyển nền trong suốt của PNG thành nền trắng
+        if raw_img.mode in ('RGBA', 'LA') or (raw_img.mode == 'P' and 'transparency' in raw_img.info):
+            rgba = raw_img.convert('RGBA')
+            photo = Image.new('RGB', rgba.size, (255, 255, 255))
+            photo.paste(rgba, mask=rgba.split()[3])
+        else:
+            photo = raw_img.convert('RGB')
+
         with st.spinner('Đang kiểm tra...'):
             res = classify(photo, artifact)
             

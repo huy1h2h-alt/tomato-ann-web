@@ -25,8 +25,14 @@ class SegmentationInfo:
 
 def read_pil(path: str) -> Image.Image:
     with Image.open(path) as im:
-        return ImageOps.exif_transpose(im).convert('RGB').copy()
-
+        im = ImageOps.exif_transpose(im)
+        # Nếu là ảnh PNG có kênh trong suốt (Alpha channel), chuyển nền thành màu TRẮNG
+        if im.mode in ('RGBA', 'LA') or (im.mode == 'P' and 'transparency' in im.info):
+            rgba = im.convert('RGBA')
+            bg = Image.new('RGB', rgba.size, (255, 255, 255))
+            bg.paste(rgba, mask=rgba.split()[3])
+            return bg
+        return im.convert('RGB')
 
 def to_rgb(image: Image.Image | np.ndarray) -> np.ndarray:
     if isinstance(image, Image.Image):
