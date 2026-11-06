@@ -1,6 +1,4 @@
-"""Robust Image Features for Tomato Leaf Classification (ExG + CLAHE + HOG + LBP + HSV + Hu).
-Optimized for real-world mobile phone camera photos with non-uniform backgrounds.
-"""
+"""Robust Image Features for Tomato Leaf Classification (HSV + HOG + LBP + Hu)."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -17,7 +15,7 @@ HOG_SIZE = 96
 
 @dataclass
 class SegmentationInfo:
-    mask: np.ndarray  # uint8 0/255
+    mask: np.ndarray
     coverage: float
     warning: str
     bg_variation: float
@@ -35,10 +33,8 @@ def read_pil(path: str) -> Image.Image:
 
 
 def to_rgb(image: Image.Image | np.ndarray) -> np.ndarray:
-    """Chuyển đổi ảnh sang RGB 256x256, tự động thay thế kênh Alpha (trong suốt) bằng màu TRẮNG."""
     if isinstance(image, Image.Image):
         im = ImageOps.exif_transpose(image)
-        # Xử lý nền trong suốt của ảnh PNG/WEBP
         if im.mode in ('RGBA', 'LA') or (im.mode == 'P' and 'transparency' in im.info):
             rgba = im.convert('RGBA')
             bg = Image.new('RGB', rgba.size, (255, 255, 255))
@@ -52,29 +48,16 @@ def to_rgb(image: Image.Image | np.ndarray) -> np.ndarray:
     if a.ndim == 2:
         a = cv2.cvtColor(a, cv2.COLOR_GRAY2RGB)
     if a.shape[-1] == 4:
-        # Nếu mảng 4 kênh RGBA: hòa trộn kênh Alpha với nền trắng (255)
         alpha = a[:, :, 3:] / 255.0
         a = (a[:, :, :3] * alpha + 255.0 * (1.0 - alpha)).astype(np.uint8)
-        
     return cv2.resize(a, (IMAGE_SIZE, IMAGE_SIZE), interpolation=cv2.INTER_AREA)
-
-def normalize_illumination(rgb: np.ndarray) -> np.ndarray:
-    """Cân bằng ánh sáng bằng CLAHE trong không gian màu LAB để triệt tiêu bóng râm/thừa sáng."""
-    lab = cv2.cvtColor(rgb, cv2.COLOR_RGB2LAB)
-    l, a, b = cv2.split(lab)
-    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-    cl = clahe.apply(l)
-    limg = cv2.merge((cl, a, b))
-    return cv2.cvtColor(limg, cv2.COLOR_LAB2RGB)
 
 
 def segment_leaf(rgb: np.ndarray) -> SegmentationInfo:
-    """Tách nền thông minh bằng kết hợp Excess Green Index (ExG) và LAB Border Distance."""
-    rgb_norm = normalize_illumination(rgb)
-    lab = cv2.cvtColor(rgb_norm, cv2.COLOR_RGB2LAB).astype(np.float32)
+    """Tách lá khỏi nền bằng ExG + LAB distance."""
+    lab = cv2.cvtColor(rgb, cv2.COLOR_RGB2LAB).astype(np.float32)
     h, w = lab.shape[:2]
 
-    # 1. Tính khoảng cách màu nền ở viền ảnh
     b = max(6, int(min(h, w) * 0.07))
     outer = np.concatenate([lab[:b].reshape(-1, 3), lab[-b:].reshape(-1, 3),
                             lab[:, :b].reshape(-1, 3), lab[:, -b:].reshape(-1, 3)], axis=0)
@@ -85,21 +68,18 @@ def segment_leaf(rgb: np.ndarray) -> SegmentationInfo:
     threshold = float(np.clip(np.percentile(border_delta, 90) + 9, 13, 47))
     m_lab = (delta > threshold).astype(np.uint8) * 255
 
-    # 2. Tính chỉ số thực vật ExG (2*G - R - B) để tách lá khỏi bàn tay/đất/gỗ
     r, g, b_ch = rgb[:, :, 0].astype(np.float32), rgb[:, :, 1].astype(np.float32), rgb[:, :, 2].astype(np.float32)
     exg = 2.0 * g - r - b_ch
     exg_norm = cv2.normalize(exg, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
     _, m_exg = cv2.threshold(exg_norm, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
 
-    # Nếu nền không trơn (variation > 20), ưu tiên dùng ExG mask để tránh lấy bàn tay/nền
-    if variation > 20 and (m_exg > 0).sum() > 100:
+    if variation > 15 and (m_exg > 0).sum() > 100:
         m = cv2.bitwise_and(m_lab, m_exg)
-        if (m > 0).sum() < 300:
+        if (m > 0).sum() < 200:
             m = m_exg
     else:
         m = m_lab
 
-    # Lọc nhiễu hình học
     m = cv2.morphologyEx(m, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
     m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, np.ones((7, 7), np.uint8))
 
@@ -115,12 +95,7 @@ def segment_leaf(rgb: np.ndarray) -> SegmentationInfo:
         m = mask_filled
 
     coverage = float(np.mean(m > 0))
-    warns = []
-    if variation > 28:
-        warns.append('Nền ảnh phức tạp; nên đặt lá trên mặt trơn để kết quả chính xác nhất.')
-    if coverage < .05:
-        warns.append('Lá quá nhỏ trong khung hình; hãy đưa camera gần lá hơn.')
-    return SegmentationInfo(mask=m, coverage=coverage, warning=' '.join(warns), bg_variation=variation)
+    return SegmentationInfo(mask=m, coverage=coverage, warning='', bg_variation=variation)
 
 
 def _masked_hist(ch: np.ndarray, mask: np.ndarray, bins: int, channel_range: Tuple[int, int]) -> np.ndarray:
@@ -130,13 +105,10 @@ def _masked_hist(ch: np.ndarray, mask: np.ndarray, bins: int, channel_range: Tup
 
 
 def extract_features(image: Image.Image | np.ndarray, return_preview: bool = False):
-    """Trích xuất 194 đặc trưng đa dạng (Màu sắc, Tỷ lệ vết bệnh, Hu, LBP, HOG)."""
-    rgb_raw = to_rgb(image)
-    rgb = normalize_illumination(rgb_raw)
-    seg = segment_leaf(rgb_raw)
+    rgb = to_rgb(image)
+    seg = segment_leaf(rgb)
     m = seg.mask
 
-    # Fallback an toàn nếu không tìm thấy vùng lá
     if int((m > 0).sum()) < 16:
         m = np.full((IMAGE_SIZE, IMAGE_SIZE), 255, dtype=np.uint8)
         seg = SegmentationInfo(mask=m, coverage=1.0, warning='Dùng toàn bộ khung ảnh.', bg_variation=seg.bg_variation)
@@ -145,7 +117,6 @@ def extract_features(image: Image.Image | np.ndarray, return_preview: bool = Fal
     hsv = cv2.cvtColor(rgb, cv2.COLOR_RGB2HSV)
     gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
 
-    # 1. Biểu đồ màu sắc HSV trong vùng lá
     color = [_masked_hist(hsv[:, :, 0], m, 18, (0, 180)),
              _masked_hist(hsv[:, :, 1], m, 16, (0, 256)),
              _masked_hist(hsv[:, :, 2], m, 16, (0, 256))]
@@ -157,18 +128,17 @@ def extract_features(image: Image.Image | np.ndarray, return_preview: bool = Fal
                   rgb_vals.mean(axis=0) / 255,
                   rgb_vals.std(axis=0) / 255]
 
-    # 2. Tỷ lệ các vùng màu sắc bệnh hại (Xoắn/cháy/đốm nâu/vàng)
+    # Đã tinh chỉnh: Mở rộng green (S>20) để bao phủ gân lá; Siết pale (S<25, V>180) tránh nhầm lẫn gân lá
     H, S, V = (hsv[:, :, i] for i in range(3))
-    green = (H >= 30) & (H <= 95) & (S > 35)
-    yellow = (H >= 14) & (H < 30) & (S > 30)
-    brown = (H >= 3) & (H < 14) & (S > 30) & (V < 210)
-    dark = V < 60
-    pale = (S < 40) & (V > 130)
+    green = (H >= 25) & (H <= 95) & (S > 20)
+    yellow = (H >= 12) & (H < 25) & (S > 40)
+    brown = (H >= 2) & (H < 12) & (S > 40) & (V < 180)
+    dark = (V < 45)
+    pale = (S < 25) & (V > 180)
     n_inside = int(inside.sum())
     proportions = np.array([((x & inside).sum() / n_inside) for x in
                             (green, yellow, brown, dark, pale)], dtype=np.float32)
 
-    # 3. Đặc trưng hình học Hu Moments
     mom = cv2.moments(m, binaryImage=True)
     hu = cv2.HuMoments(mom).reshape(-1)
     hu = -np.sign(hu) * np.log10(np.abs(hu) + 1e-10)
@@ -185,7 +155,6 @@ def extract_features(image: Image.Image | np.ndarray, return_preview: bool = Fal
     else:
         shape = np.zeros(5, dtype=np.float32)
 
-    # 4. Đặc trưng kết cấu bề mặt LBP
     gray_masked = np.where(inside, gray, 0).astype(np.uint8)
     lbp = local_binary_pattern(gray_masked, P=8, R=1, method='uniform')
     texture = []
@@ -197,7 +166,6 @@ def extract_features(image: Image.Image | np.ndarray, return_preview: bool = Fal
         hist = np.bincount(np.clip(values.astype(int), 0, 9), minlength=10).astype(np.float32)
         texture.append(hist / (hist.sum() + 1e-9))
 
-    # 5. Đặc trưng đường biên HOG trên vùng cropped của lá
     x, y, w, h = cv2.boundingRect(cnt) if cnt is not None else (0, 0, 256, 256)
     pad = int(max(w, h) * .08)
     x1, y1 = max(x - pad, 0), max(y - pad, 0)
@@ -211,5 +179,5 @@ def extract_features(image: Image.Image | np.ndarray, return_preview: bool = Fal
     if not np.isfinite(vec).all():
         raise ValueError('Đặc trưng ảnh chứa giá trị không hợp lệ (NaN/Inf).')
     if return_preview:
-        return vec, rgb_raw, seg
+        return vec, rgb, seg
     return vec
