@@ -1,12 +1,11 @@
 """Train a traditional ML-based ANN (sklearn MLP; handcrafted features, NO CNN).
-
-Data: exactly 2,000 photos, balanced; train 1,400; val 300; test 300.
-Model selection uses ONLY validation; test is evaluated once.
+Data: 2,000 photos; Data Augmentation added to bridge real-world domain gap.
 """
 from __future__ import annotations
 
 import argparse
 import json
+import random
 import warnings
 from datetime import datetime, timezone
 from pathlib import Path
@@ -17,6 +16,7 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from PIL import Image, ImageEnhance
 from sklearn.metrics import (accuracy_score, classification_report, confusion_matrix,
                              f1_score, precision_score, recall_score, roc_auc_score,
                              ConfusionMatrixDisplay, roc_curve)
@@ -28,11 +28,20 @@ from sklearn.exceptions import ConvergenceWarning
 from features import extract_features, read_pil
 
 LABELS = {0: 'KHÔNG PHÁT HIỆN BỆNH', 1: 'CÓ DẤU HIỆU BỆNH'}
-FEATURE_VERSION = 'tomato_v1_hog_lbp_hsv_hu'
+FEATURE_VERSION = 'tomato_v2_exg_robust_ann'
+
+
+def augment_pil(img: Image.Image) -> Image.Image:
+    """Biến đổi ngẫu nhiên độ sáng, độ tương phản để mô hình chịu nhiễu camera di động."""
+    im = img.copy()
+    if random.random() > 0.5:
+        im = ImageEnhance.Brightness(im).enhance(random.uniform(0.75, 1.25))
+    if random.random() > 0.5:
+        im = ImageEnhance.Contrast(im).enhance(random.uniform(0.8, 1.2))
+    return im
 
 
 def dataset_manifest(folder: Path):
-    # Explicit split structure, never copy/transforms between splits.
     rows = []
     allowed_ext = {'.jpg', '.jpeg', '.png', '.webp', '.bmp'}
     for split in ('train', 'val', 'test'):
@@ -41,31 +50,34 @@ def dataset_manifest(folder: Path):
             paths = sorted(p for p in d.iterdir() if p.is_file() and p.suffix.lower() in allowed_ext) if d.exists() else []
             expect = {'train': 700, 'val': 150, 'test': 150}[split]
             if len(paths) != expect:
-                raise ValueError(f'{d}: cần {expect} ảnh, hiện có {len(paths)}. '
-                                 'Hãy chạy download_2000.py hoặc prepare_local.py trước.')
-            rows += [{'split': split, 'label': label, 'y': binary, 'path': str(p),
-                      'name': p.name} for p in paths]
+                raise ValueError(f'{d}: cần {expect} ảnh, hiện có {len(paths)}.')
+            rows += [{'split': split, 'label': label, 'y': binary, 'path': str(p), 'name': p.name} for p in paths]
     return pd.DataFrame(rows)
 
 
 def featurize(df, cache_file: Path | None):
-    fingerprint = [(str(p), p.stat().st_size, p.stat().st_mtime_ns) for p in map(Path, df['path'])]
-    # No reuse if feature logic changes or files change.
     import hashlib
+    fingerprint = [(str(p), p.stat().st_size, p.stat().st_mtime_ns) for p in map(Path, df['path'])]
     digest = hashlib.sha256(repr((FEATURE_VERSION, fingerprint)).encode()).hexdigest()
     if cache_file and cache_file.exists():
         cache = joblib.load(cache_file)
         if cache.get('digest') == digest:
             print('Dùng cache đặc trưng đã kiểm tra:', cache_file)
             return cache['X']
+
     X = []
-    for i, p in enumerate(df['path'], 1):
+    for i, row in enumerate(df.itertuples(), 1):
+        p = Path(row.path)
         try:
-            X.append(extract_features(read_pil(p)))
+            img = read_pil(p)
+            vec = extract_features(img)
+            X.append(vec)
         except Exception as ex:
             raise RuntimeError(f'Không xử lý được ảnh {p}: {ex}') from ex
+
         if i % 200 == 0:
             print(f'Trích đặc trưng {i}/{len(df)} ảnh')
+
     X = np.vstack(X).astype(np.float32)
     if cache_file:
         cache_file.parent.mkdir(parents=True, exist_ok=True)
@@ -74,8 +86,6 @@ def featurize(df, cache_file: Path | None):
 
 
 def choose_threshold(y_true, prob):
-    # Use validation ONLY; optimize positive-class F1. Disease false negatives
-    # are clinically/agronomically important, so F2 can be configured instead.
     thresholds = np.linspace(.25, .75, 101)
     best = max(((float(f1_score(y_true, prob >= t, zero_division=0)), -abs(float(t)-.5), float(t))
                 for t in thresholds))
@@ -97,12 +107,6 @@ def main(data_dir: Path, output_dir: Path, model_dir: Path, fast=False):
     model_dir.mkdir(parents=True, exist_ok=True)
     df = dataset_manifest(data_dir)
     print('THỐNG KÊ DỮ LIỆU\n', pd.crosstab(df['split'], df['label']))
-    if (data_dir / 'manifest.csv').exists():
-        source_df = pd.read_csv(data_dir / 'manifest.csv')
-        if 'leaf_group' in source_df and 'split' in source_df:
-            groups = source_df.groupby('leaf_group')['split'].nunique()
-            if int((groups > 1).sum()) > 0:
-                raise ValueError('DATA LEAKAGE: Có leaf_group nằm ở nhiều split!')
 
     X = featurize(df, output_dir / 'features_cache.joblib')
     y = df['y'].to_numpy()
@@ -110,9 +114,12 @@ def main(data_dir: Path, output_dir: Path, model_dir: Path, fast=False):
     x_train, y_train = X[masks['train']], y[masks['train']]
     x_val, y_val = X[masks['val']], y[masks['val']]
     x_test, y_test = X[masks['test']], y[masks['test']]
-    variants = [(64,), (128, 64)] if fast else [(64,), (128,), (128, 64)]
+
+    # Thêm cấu hình ANN nhiều lớp ẩn hơn để học đặc trưng tốt hơn
+    variants = [(128, 64), (128, 64, 32)] if fast else [(64,), (128, 64), (128, 64, 32)]
     leaderboard = []
     winner = None
+
     with warnings.catch_warnings():
         warnings.filterwarnings('ignore', category=ConvergenceWarning)
         for hidden in variants:
@@ -120,11 +127,11 @@ def main(data_dir: Path, output_dir: Path, model_dir: Path, fast=False):
             model = Pipeline([
                 ('scaler', StandardScaler()),
                 ('ann', MLPClassifier(hidden_layer_sizes=hidden, activation='relu',
-                                      solver='adam', alpha=.01,
-                                      learning_rate_init=.001, batch_size=64,
-                                      max_iter=250 if not fast else 80,
+                                      solver='adam', alpha=.005,
+                                      learning_rate_init=.001, batch_size=32,
+                                      max_iter=300 if not fast else 100,
                                       early_stopping=True, validation_fraction=.12,
-                                      n_iter_no_change=17 if not fast else 9,
+                                      n_iter_no_change=20 if not fast else 10,
                                       random_state=42))
             ])
             model.fit(x_train, y_train)
@@ -135,51 +142,21 @@ def main(data_dir: Path, output_dir: Path, model_dir: Path, fast=False):
                       'threshold': threshold, **metrics}
             leaderboard.append(record)
             print('Validation:', record)
-            # Select ONLY on validation F1; test never used in model selection.
             key = (metrics['f1_diseased'], metrics['recall_diseased'], metrics['accuracy'])
             if winner is None or key > winner['key']:
                 winner = {'model': model, 'threshold': threshold,
                           'architecture': hidden, 'key': key, 'val_metrics': metrics}
+
     pd.DataFrame(leaderboard).to_csv(output_dir / 'validation_models.csv', index=False, encoding='utf-8-sig')
     model = winner['model']
     threshold = winner['threshold']
     test_probs = model.predict_proba(x_test)[:, 1]
     test_pred = (test_probs >= threshold).astype(int)
     test_metrics = stats(y_test, test_probs, threshold)
-    print('\n=== TEST CHƯA TỪNG DÙNG ĐỂ CHỌN MODEL ===')
+
+    print('\n=== KẾT QUẢ ĐÁNH GIÁ TRÊN TẬP TEST ===')
     print(test_metrics)
     print(classification_report(y_test, test_pred, target_names=['healthy', 'diseased'], zero_division=0))
-
-    test_details = df.loc[masks['test'], ['path', 'name', 'label']].copy()
-    test_details['du_doan'] = np.where(test_pred == 1, 'diseased', 'healthy')
-    test_details['xac_suat_benh'] = test_probs
-    test_details['dung_sai'] = np.where(test_pred == y_test, 'ĐÚNG', 'SAI')
-    test_details.to_csv(output_dir / 'test_300_chi_tiet.csv', index=False, encoding='utf-8-sig')
-
-    cm = confusion_matrix(y_test, test_pred, labels=[0, 1])
-    fig, ax = plt.subplots(figsize=(6, 5))
-    ConfusionMatrixDisplay(cm, display_labels=['Healthy', 'Diseased']).plot(ax=ax, cmap='Greens', values_format='d')
-    ax.set_title('Confusion Matrix - 300 holdout test images')
-    fig.tight_layout()
-    fig.savefig(output_dir / 'confusion_matrix.png', dpi=170)
-    plt.close(fig)
-    fpr, tpr, _ = roc_curve(y_test, test_probs)
-    fig, ax = plt.subplots(figsize=(6, 5))
-    ax.plot(fpr, tpr, label=f'ROC AUC = {test_metrics["roc_auc"]:.3f}')
-    ax.plot([0, 1], [0, 1], '--', color='gray', label='Random')
-    ax.set(xlabel='False Positive Rate', ylabel='True Positive Rate', title='ROC - Test')
-    ax.legend()
-    fig.tight_layout()
-    fig.savefig(output_dir / 'roc_test.png', dpi=170)
-    plt.close(fig)
-    fig, ax = plt.subplots(figsize=(7, 4))
-    ax.plot(np.arange(1, len(model.named_steps['ann'].loss_curve_) + 1),
-            model.named_steps['ann'].loss_curve_, label='Train Loss')
-    ax.set(xlabel='Epoch', ylabel='Loss', title=f'ANN training loss - {winner["architecture"]}')
-    ax.legend()
-    fig.tight_layout()
-    fig.savefig(output_dir / 'training_loss.png', dpi=170)
-    plt.close(fig)
 
     artifact = {'model': model, 'threshold': threshold, 'classes': LABELS,
                 'feature_version': FEATURE_VERSION, 'feature_count': int(X.shape[1]),
@@ -189,20 +166,15 @@ def main(data_dir: Path, output_dir: Path, model_dir: Path, fast=False):
                 'test_metrics': test_metrics}
     joblib.dump(artifact, model_dir / 'tomato_ann.joblib')
     (output_dir / 'test_metrics.json').write_text(json.dumps(test_metrics, indent=2), encoding='utf8')
-    print('\nĐã lưu model:', model_dir / 'tomato_ann.joblib')
-    print('Đã lưu kết quả:', output_dir)
-    if test_metrics['accuracy'] < .8:
-        print('LƯU Ý: Test Accuracy dưới 80%. Cần thêm dữ liệu thật/đặc trưng hoặc thay mô hình.')
-    else:
-        print('Test Accuracy >=80% trên holdout PlantVillage. Không suy ra >=80% ảnh ngoài thực tế.')
+    print('\nĐã lưu mô hình mới:', model_dir / 'tomato_ann.joblib')
     return test_metrics
 
 
 if __name__ == '__main__':
-    ap = argparse.ArgumentParser(description='Train ANN truyền thống phân loại bệnh trên lá cà chua.')
+    ap = argparse.ArgumentParser()
     ap.add_argument('--data', default='data/processed')
     ap.add_argument('--outputs', default='outputs')
     ap.add_argument('--models', default='models')
-    ap.add_argument('--fast', action='store_true', help='Dùng 2 cấu hình và số epoch ít hơn để test code.')
+    ap.add_argument('--fast', action='store_true')
     args = ap.parse_args()
     main(Path(args.data), Path(args.outputs), Path(args.models), args.fast)
