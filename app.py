@@ -38,8 +38,8 @@ st.markdown(
 )
 
 st.title("🍅 Kiểm tra lá cà chua")
-st.caption(f"Tomato ANN V{APP_VERSION} | Machine Learning truyền thống | Không sử dụng CNN")
-st.caption("Chụp một lá rõ nét để kiểm tra dấu hiệu bệnh. Ảnh chỉ được xử lý trong phiên, không lưu thành bộ dữ liệu.")
+
+st.caption("Chụp một lá rõ nét để kiểm tra dấu hiệu bệnh.")
 
 
 @st.cache_resource(show_spinner=False)
