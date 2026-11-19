@@ -1,13 +1,10 @@
-numpy>=1.24,<3
-pandas>=2.0,<3
-Pillow>=10,<13
-opencv-python-headless>=4.8,<5
-scikit-image>=0.22,<1
-scikit-learn>=1.4,<2
-matplotlib>=3.7,<4
-seaborn>=0.13,<1
-joblib>=1.3,<2
-streamlit>=1.35,<2
-# Required only by the automatic PlantVillage downloader:
-datasets>=2.20,<5
-huggingface_hub>=0.24,<2
+# Exact runtime versions from the local environment.
+# Keep this file in sync with the environment used to train tomato_ann.joblib.
+numpy==2.4.6
+scipy==1.17.1
+Pillow==12.3.0
+opencv-python-headless==4.14.0.94
+scikit-image==0.26.0
+scikit-learn==1.9.1
+joblib==1.6.0
+streamlit==1.67.0

@@ -1,77 +1,119 @@
-"""Streamlit app tối giản: Chỉ hiển thị kết quả lá có bệnh hay không."""
+"""Simple mobile-first Streamlit UI for the existing classical ANN model.
+
+Image upload uses the phone's native camera/gallery picker when available.
+The live camera option needs HTTPS on mobile browsers (or localhost on PC).
+"""
+from __future__ import annotations
+
 from pathlib import Path
-import io
 
 import streamlit as st
-from PIL import Image, ImageOps
-from predict import load_model, classify
 
-st.set_page_config(page_title='Chẩn đoán lá cà chua', page_icon='🍅', layout='centered')
+from predict import DEFAULT_MODEL, classify, load_model
+from mobile_image import load_mobile_image
 
-st.markdown('''
-<style>
-.block-container { max-width: 500px; padding-top: 1.5rem; }
-.result-box {
-    padding: 1.5rem;
-    border-radius: 12px;
-    text-align: center;
-    font-size: 1.4rem;
-    font-weight: bold;
-    margin-top: 1.2rem;
-}
-.diseased { background-color: #ffebe9; color: #cf222e; border: 2px solid #ff8182; }
-.healthy { background-color: #dafbe1; color: #1a7f37; border: 2px solid #4ac26b; }
-</style>
-''', unsafe_allow_html=True)
+APP_VERSION = "3.0.0"
 
-st.title("🍅 Kiểm Tra Bệnh Lá Cà Chua")
+st.set_page_config(
+    page_title="Kiểm tra lá cà chua",
+    page_icon="🍅",
+    layout="centered",
+    initial_sidebar_state="collapsed",
+)
 
-model_file = Path(__file__).resolve().parent / 'models' / 'tomato_ann.joblib'
+# One-column UI, with larger touch targets on mobile devices.
+st.markdown(
+    """
+    <style>
+      .block-container {max-width: 580px; padding-top: 1.1rem; padding-bottom: 2rem;}
+      #MainMenu, footer {visibility: hidden;}
+      div.stButton > button {min-height: 3.1rem; font-size: 1.08rem; font-weight: 650;}
+      @media (max-width: 600px) {
+        .block-container {padding-left: .85rem; padding-right: .85rem;}
+        h1 {font-size: 1.75rem !important;}
+      }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+st.title("🍅 Kiểm tra lá cà chua")
+st.caption(f"Tomato ANN V{APP_VERSION} | Machine Learning truyền thống | Không sử dụng CNN")
+st.caption("Chụp một lá rõ nét để kiểm tra dấu hiệu bệnh. Ảnh chỉ được xử lý trong phiên, không lưu thành bộ dữ liệu.")
+
 
 @st.cache_resource(show_spinner=False)
-def get_model(path, mtime):
+def get_model(path: str, modified_ns: int, size: int):
+    """Reload only when the trained model file changes."""
     return load_model(path)
 
-if not model_file.exists():
-    st.error("Chưa tìm thấy tệp mô hình trong thư mục `models/`.")
+
+model_file = Path(DEFAULT_MODEL)
+if not model_file.is_file():
+    st.error("Chưa có mô hình. Hãy huấn luyện ANN trước khi mở app.")
+    st.code("python train.py --data data/processed", language="bash")
     st.stop()
 
 try:
-    artifact = get_model(str(model_file), model_file.stat().st_mtime_ns)
-except Exception as e:
-    st.error(f"Lỗi nạp mô hình: {e}")
+    artifact = get_model(
+        str(model_file), model_file.stat().st_mtime_ns, model_file.stat().st_size
+    )
+except Exception as exc:
+    st.error(f"Không thể mở mô hình ANN: {exc}")
     st.stop()
 
-mode = st.radio("Chọn phương thức:", ["📷 Chụp ảnh", "📁 Tải ảnh từ máy"], horizontal=True)
+# Default option stays usable on a phone even when browser camera permission
+# is restricted; many mobile browsers offer 'Take Photo' in the file picker.
+source = st.radio(
+    "Chọn cách lấy ảnh",
+    ("📱 Chụp / chọn ảnh", "🎥 Camera trực tiếp"),
+    horizontal=True,
+)
 
-image_file = None
-if mode == "📷 Chụp ảnh":
-    image_file = st.camera_input("Chụp lá cà chua")
+if source == "📱 Chụp / chọn ảnh":
+    uploaded = st.file_uploader(
+        "Nhấn để mở camera hoặc chọn ảnh trong điện thoại",
+        type=["jpg", "jpeg", "png", "webp"],
+        accept_multiple_files=False,
+        key="mobile_photo",
+    )
 else:
-    image_file = st.file_uploader("Tải file ảnh lá", type=['jpg', 'jpeg', 'png', 'webp'])
+    st.caption("Camera trực tiếp trên điện thoại cần liên kết HTTPS và quyền truy cập camera.")
+    uploaded = st.camera_input("Chụp lá cà chua", key="live_camera")
 
-if image_file is not None:
+if uploaded is not None:
     try:
-        raw_img = Image.open(io.BytesIO(image_file.getvalue()))
-        raw_img = ImageOps.exif_transpose(raw_img)
-        
-        # Chuyển nền trong suốt của PNG thành nền trắng
-        if raw_img.mode in ('RGBA', 'LA') or (raw_img.mode == 'P' and 'transparency' in raw_img.info):
-            rgba = raw_img.convert('RGBA')
-            photo = Image.new('RGB', rgba.size, (255, 255, 255))
-            photo.paste(rgba, mask=rgba.split()[3])
-        else:
-            photo = raw_img.convert('RGB')
+        photo = load_mobile_image(uploaded.getvalue())
+        st.image(photo, caption="Ảnh cần kiểm tra", use_container_width=True)
+        if st.button("🔍 KIỂM TRA LÁ", type="primary", use_container_width=True):
+            with st.spinner("Đang kiểm tra..."):
+                result = classify(photo, artifact)
 
-        with st.spinner('Đang kiểm tra...'):
-            res = classify(photo, artifact)
-            
-        st.image(photo, use_container_width=True)
-        
-        if res['diseased']:
-            st.markdown('<div class="result-box diseased">🔴 LÁ CÓ DẤU HIỆU BỆNH</div>', unsafe_allow_html=True)
-        else:
-            st.markdown('<div class="result-box healthy">🟢 LÁ KHỎE MẠNH</div>', unsafe_allow_html=True)
+            decision = result["decision"]
+            if decision == "healthy":
+                st.success("🟢 KHÔNG PHÁT HIỆN DẤU HIỆU BỆNH")
+                st.caption("Mô hình nghiêng về lá khỏe. Hãy tiếp tục theo dõi lá thực tế.")
+            elif decision == "diseased":
+                st.error("🔴 LÁ CÓ DẤU HIỆU BỆNH")
+                st.caption("Mô hình nghiêng về lá bệnh; chưa xác định tên bệnh cụ thể.")
+            elif decision == "uncertain":
+                st.warning("🟡 CHƯA THỂ KẾT LUẬN")
+                st.caption("Hãy chụp thêm một ảnh rõ nét, đủ sáng để kiểm tra lại.")
+            else:
+                st.warning("⚪ ẢNH CHƯA PHÙ HỢP")
+                st.caption("Hãy chụp một lá riêng biệt trên nền đơn giản.")
 
-    except Exception as e:
-        st.error(f"Lỗi đọc ảnh: {e}")
+            if result["warnings"] and decision in ("invalid", "uncertain"):
+                st.caption("Gợi ý: " + " ".join(result["warnings"]))
+
+    except ValueError as exc:
+        st.error(str(exc))
+    except Exception as exc:
+        st.error("Không kiểm tra được ảnh. Vui lòng thử lại hoặc xem lỗi trong Terminal.")
+        # Full exception is printed only to the server log, not to the mobile UI.
+        import logging
+
+        logging.getLogger(__name__).exception("Mobile ANN inference failed: %s", exc)
+
+st.divider()
+st.caption("Công cụ tham khảo cho lá cà chua; kết quả ANN không thay thế việc kiểm tra thực tế.")
