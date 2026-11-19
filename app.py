@@ -95,7 +95,7 @@ if uploaded is not None:
                 st.caption("Mô hình nghiêng về lá khỏe. Hãy tiếp tục theo dõi lá thực tế.")
             elif decision == "diseased":
                 st.error("🔴 LÁ CÓ DẤU HIỆU BỆNH")
-                st.caption("Mô hình nghiêng về lá bệnh; chưa xác định tên bệnh cụ thể.")
+                st.caption("Mô hình nghiêng về lá bệnh.")
             elif decision == "uncertain":
                 st.warning("🟡 CHƯA THỂ KẾT LUẬN")
                 st.caption("Hãy chụp thêm một ảnh rõ nét, đủ sáng để kiểm tra lại.")
@@ -116,4 +116,4 @@ if uploaded is not None:
         logging.getLogger(__name__).exception("Mobile ANN inference failed: %s", exc)
 
 st.divider()
-st.caption("Công cụ tham khảo cho lá cà chua; kết quả ANN không thay thế việc kiểm tra thực tế.")
+st.caption("Công cụ tham khảo cho lá cà chua; kết quả không thay thế việc kiểm tra thực tế.")
